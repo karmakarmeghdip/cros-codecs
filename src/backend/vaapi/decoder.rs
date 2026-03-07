@@ -180,7 +180,7 @@ impl<V: VideoFrame> VaapiDecodedHandle<V> {
         }
     }
 
-    pub(crate) fn surface(&self) -> &Surface<<V as VideoFrame>::MemDescriptor> {
+    pub fn surface(&self) -> &Surface<<V as VideoFrame>::MemDescriptor> {
         self.state.surface()
     }
 
@@ -207,25 +207,57 @@ impl<V: VideoFrame> VaapiBackend<V> {
             display_resolution: Resolution::from((16, 16)),
             min_num_frames: 1,
         };
-        let config = display
-            .create_config(
+        let preferred_profiles = [
+            libva::VAProfile::VAProfileH264High,
+            libva::VAProfile::VAProfileH264Main,
+            libva::VAProfile::VAProfileH264ConstrainedBaseline,
+        ];
+        let supported_profiles = display.query_config_profiles().unwrap_or_default();
+        let mut context = None;
+
+        for profile in preferred_profiles
+            .into_iter()
+            .filter(|profile| supported_profiles.contains(profile))
+        {
+            let entrypoints = match display.query_config_entrypoints(profile) {
+                Ok(entrypoints) => entrypoints,
+                Err(_) => continue,
+            };
+            if !entrypoints.contains(&libva::VAEntrypoint::VAEntrypointVLD) {
+                continue;
+            }
+
+            let config = match display.create_config(
                 vec![libva::VAConfigAttrib {
                     type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
                     value: libva::VA_RT_FORMAT_YUV420,
                 }],
-                libva::VAProfile::VAProfileH264Main,
+                profile,
                 libva::VAEntrypoint::VAEntrypointVLD,
-            )
-            .expect("Could not create initial VAConfig!");
-        let context = display
-            .create_context::<<V as VideoFrame>::MemDescriptor>(
-                &config,
-                init_stream_info.coded_resolution.width,
-                init_stream_info.coded_resolution.height,
-                None,
-                true,
-            )
-            .expect("Could not create initial VAContext!");
+            ) {
+                Ok(config) => config,
+                Err(_) => continue,
+            };
+
+            for (width, height, progressive) in [(16, 16, true), (16, 16, false), (64, 64, true), (64, 64, false)] {
+                if let Ok(created_context) = display.create_context::<<V as VideoFrame>::MemDescriptor>(
+                    &config,
+                    width,
+                    height,
+                    None,
+                    progressive,
+                ) {
+                    context = Some(created_context);
+                    break;
+                }
+            }
+
+            if context.is_some() {
+                break;
+            }
+        }
+
+        let context = context.expect("Could not create initial VAContext!");
         Self {
             display: display,
             context: context,
